@@ -1,0 +1,4 @@
+interface:
+  display_name: "启智自制仿真实验"
+  short_description: "按教材开发、修复与接入启智科学实验，提供分阶段验收和可复查证据"
+  default_prompt: "使用 $custom-sim，在当前启智仓库中根据我提供的课本资料设计、开发并验证自制实验。"
