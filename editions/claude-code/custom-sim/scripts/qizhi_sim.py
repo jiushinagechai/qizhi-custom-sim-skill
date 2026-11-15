@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+from socketserver import TCPServer
 import subprocess
 import sys
 import tempfile
@@ -222,8 +223,14 @@ def preview(args, root):
             self.send_error(403, 'Directory listing disabled')
             return None
 
+    class LocalServer(ThreadingHTTPServer):
+        def server_bind(self):
+            # HTTPServer's reverse DNS lookup can stall offline/restricted hosts.
+            TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address[:2]
+
     # Serve only the static simulation folder, never the project or textbook root.
-    with ThreadingHTTPServer(('127.0.0.1', args.port), partial(Handler, directory=str(sim.parent))) as server:
+    with LocalServer(('127.0.0.1', args.port), partial(Handler, directory=str(sim.parent))) as server:
         url = 'http://127.0.0.1:' + str(server.server_port) + '/' + quote(sim.name) + '?preview=' + digest[:12]
         print(json.dumps(dict(url=url, sha256=digest, note='Local preview; keep this process running. Ctrl+C stops it.'),
                          ensure_ascii=False), flush=True)

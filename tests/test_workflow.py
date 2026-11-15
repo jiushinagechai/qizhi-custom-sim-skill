@@ -195,7 +195,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(before, self.mpath.read_bytes())
 
     def test_preview_http_refresh_and_directory_boundary(self):
-        process = subprocess.Popen([sys.executable, str(SCRIPT), '--repo', str(self.root),
+        # Fail deterministically if startup tries unnecessary reverse DNS.
+        bootstrap = "import socket,runpy,sys; socket.getfqdn=lambda *a: (_ for _ in ()).throw(RuntimeError('reverse DNS must not run')); sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name='__main__')"
+        process = subprocess.Popen([sys.executable, '-c', bootstrap, str(SCRIPT), '--repo', str(self.root),
                                     'preview', 'example', '--serve'], stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL, text=True, encoding='utf-8',
                                    env={**os.environ, 'PYTHONUTF8': '1'})

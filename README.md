@@ -175,6 +175,7 @@ python "/path/to/skill/scripts/qizhi_sim.py" --repo "/path/to/qizhi" preview exa
 ```
 
 预览默认选择空闲端口，仅绑定 `127.0.0.1`，只服务实验静态目录，禁用目录列表和缓存。
+v1.1.1 移除了启动时不必要的反向 DNS 查询，避免离线或受限网络环境等待主机名解析。
 在托管终端中运行时，AI 应保留会话供你检查，修改后刷新即可；截图只作辅助。
 远程主机的 localhost 不是你电脑的 localhost，需要使用宿主支持的转发/预览功能或直接交付 HTML。
 
