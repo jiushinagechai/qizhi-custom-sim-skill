@@ -15,7 +15,16 @@ Include reset/repeatability, model boundaries, and the input methods relevant to
 - Machine run and logs (under phet-audit/out/skill):
 - Screenshots / recorded observations:
 - Independent review findings and disposition:
-- Actual user acceptance:
+- Actual design approval (document revision and statement):
+- Actual Demo acceptance (reviewed page revision/hash and statement):
+- Authorization to integrate (statement; can be the same as Demo acceptance):
+- Actual platform-page review (URL/mode/device and outcome):
 - Pending real-device, task-card, CSV, or classroom checks:
 
+## Preview feedback rounds
+
+| Round / revision | Openable preview and checked actions | User feedback | Correction and affected docs/tests | Evidence / resolved or pending |
+| --- | --- | --- | --- | --- |
+
+Keep personal device data out of shared evidence. Do not mark a round accepted merely because tests passed.
 Record measured outcomes and limitations, not only checkmarks.

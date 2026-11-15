@@ -6,7 +6,11 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import queue
+import threading
 import unittest
+from urllib.request import urlopen
+from urllib.error import HTTPError
 
 PACKAGE = Path(__file__).resolve().parents[1]
 SCRIPT = PACKAGE / 'common/custom-sim/scripts/qizhi_sim.py'
@@ -98,6 +102,154 @@ class WorkflowTests(unittest.TestCase):
         checks = self.gate()
         self.assertTrue(checks['passed'])
         self.assertEqual(checks['results']['cache']['status'], 'pass')
+
+    def test_init_creates_development_handoff(self):
+        path = self.root / self.manifest()['development']
+        self.assertTrue(path.is_file())
+        self.assertIn('Functional contract', path.read_text(encoding='utf-8'))
+        path.unlink()
+        self.assertEqual(self.gate('demo', expected=1)['results']['files']['status'], 'fail')
+
+    def test_v1_ledger_remains_usable(self):
+        m = self.manifest()
+        del m['development']
+        self.mpath.write_text(json.dumps(m), encoding='utf-8')
+        self.gate('demo')
+
+    def setup_textbooks(self):
+        folder = self.root / '本机 教材'
+        folder.mkdir()
+        (folder / '五上.pdf').write_bytes(b'%PDF-1.4\ncontrolled fixture')
+        (folder / '课标.pdf').write_bytes(b'%PDF-1.4\ncontrolled fixture')
+        result = self.cli('textbooks', 'configure', '--directory', str(folder), '--curriculum', '课标.pdf')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        return folder
+
+    def add_book(self, book_id='science-5a', publisher='测试版'):
+        return self.cli('textbooks', 'add', '--id', book_id, '--grade', '5', '--semester', '上',
+                        '--publisher', publisher, '--edition', '2025', '--file', '五上.pdf')
+
+    def test_textbook_mapping_persists_and_is_ignored(self):
+        folder = self.setup_textbooks()
+        result = self.add_book()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        result = self.cli('textbooks', 'find', '--grade', '5', '--semester', '上')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['matches'][0]['file'], str((folder / '五上.pdf').resolve()))
+        self.assertTrue(data['matches'][0]['available'])
+        self.assertTrue(data['curriculum_available'])
+        self.assertFalse(data['selection_required'])
+        self.assertEqual(self.git('check-ignore', q.TEXTBOOK_CONFIG), q.TEXTBOOK_CONFIG)
+
+    def test_textbook_ambiguity_is_not_silently_resolved(self):
+        self.setup_textbooks()
+        self.add_book()
+        self.add_book('second-5a', '另一个出版社')
+        result = self.cli('textbooks', 'find', '--grade', '5')
+        data = json.loads(result.stdout)
+        self.assertTrue(data['selection_required'])
+        self.assertEqual(len(data['matches']), 2)
+        result = self.cli('textbooks', 'find', '--grade', '5', '--publisher', '测试版')
+        self.assertEqual(len(json.loads(result.stdout)['matches']), 1)
+
+    def test_textbook_inventory_missing_and_duplicate(self):
+        folder = self.setup_textbooks()
+        data = json.loads(self.cli('textbooks', 'list').stdout)
+        self.assertIn('五上.pdf', data['pdf_candidates'])
+        self.assertEqual(self.cli('textbooks', 'find', '--grade', '6').returncode, 1)
+        self.add_book()
+        self.assertEqual(self.add_book().returncode, 1)
+        (folder / '五上.pdf').unlink()
+        result = self.cli('textbooks', 'find', '--grade', '5')
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(json.loads(result.stdout)['matches'][0]['available'])
+
+    def test_tracked_local_config_is_not_overwritten(self):
+        self.setup_textbooks()
+        self.git('add', '-f', q.TEXTBOOK_CONFIG)
+        before = (self.root / q.TEXTBOOK_CONFIG).read_bytes()
+        result = self.add_book()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('tracked by Git', result.stdout)
+        self.assertEqual(before, (self.root / q.TEXTBOOK_CONFIG).read_bytes())
+
+    def test_textbook_replace_and_missing_pdf(self):
+        self.setup_textbooks()
+        self.add_book()
+        result = self.cli('textbooks', 'add', '--id', 'science-5a', '--grade', '5', '--semester', '上',
+                          '--publisher', '新版本', '--edition', '2026', '--file', '五上.pdf', '--replace')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        result = self.cli('textbooks', 'find', '--grade', '5')
+        self.assertEqual(json.loads(result.stdout)['matches'][0]['edition'], '2026')
+        result = self.cli('textbooks', 'configure', '--curriculum', 'missing.pdf')
+        self.assertEqual(result.returncode, 1)
+
+    def test_preview_url_without_acceptance_side_effect(self):
+        before = self.mpath.read_bytes()
+        result = self.cli('preview', 'example')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['url'], (self.root / self.sim).resolve().as_uri())
+        self.assertEqual(len(data['sha256']), 64)
+        self.assertEqual(before, self.mpath.read_bytes())
+
+    def test_preview_http_refresh_and_directory_boundary(self):
+        process = subprocess.Popen([sys.executable, str(SCRIPT), '--repo', str(self.root),
+                                    'preview', 'example', '--serve'], stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, text=True, encoding='utf-8',
+                                   env={**os.environ, 'PYTHONUTF8': '1'})
+        lines = queue.Queue()
+        thread = threading.Thread(target=lambda: lines.put(process.stdout.readline()), daemon=True)
+        thread.start()
+        try:
+            data = json.loads(lines.get(timeout=10))
+            self.assertTrue(data['url'].startswith('http://127.0.0.1:'))
+            with urlopen(data['url'], timeout=5) as response:
+                self.assertEqual(response.headers['Cache-Control'], 'no-store')
+                self.assertIn('开始实验', response.read().decode('utf-8'))
+            self.put(self.sim, '<button>新的一轮</button>')
+            with urlopen(data['url'], timeout=5) as response:
+                self.assertIn('新的一轮', response.read().decode('utf-8'))
+            base = data['url'].rsplit('/', 1)[0]
+            with self.assertRaises(HTTPError) as error:
+                urlopen(base + '/', timeout=5)
+            self.assertEqual(error.exception.code, 403)
+            error.exception.close()
+            with self.assertRaises(HTTPError) as error:
+                urlopen(base + '/../../../.qizhi-sim.local.json', timeout=5)
+            error.exception.close()
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+            process.stdout.close()
+
+    def test_distinct_page_acceptance_and_integration_authorization(self):
+        for item in ('design', 'demo', 'integration', 'platform'):
+            result = self.cli('mark', 'example', item, '--result', 'pass', '--by', 'user',
+                              '--evidence', 'explicit statement for ' + item)
+            self.assertEqual(result.returncode, 0, result.stdout)
+        human = self.manifest()['human']
+        self.assertIn(self.sim, human['demo']['artifacts'])
+        self.assertIn(self.manifest()['development'], human['design']['artifacts'])
+        self.assertNotEqual(human['design']['evidence'], human['demo']['evidence'])
+
+    def test_missing_demo_cannot_be_marked_accepted(self):
+        (self.root / self.sim).unlink()
+        result = self.cli('mark', 'example', 'demo', '--result', 'pass', '--by', 'user', '--evidence', 'claim')
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn('demo', self.manifest()['human'])
+
+    def test_decisions_survive_unrelated_verification_changes(self):
+        for item in ('design', 'demo', 'integration'):
+            self.cli('mark', 'example', item, '--result', 'pass', '--by', 'user', '--evidence', 'actual statement')
+        self.put(q.VIEWS, VIEWS + '# integration work\n')
+        output = self.cli('status', 'example').stdout
+        self.assertIn('design: pass; actual statement', output)
+        self.assertIn('demo: pass; actual statement', output)
+        self.assertIn('integration: pass (historical decision;', output)
+        self.put(self.sim, '<button>different behavior</button>')
+        self.assertIn('demo: pass (historical decision;', self.cli('status', 'example').stdout)
 
     def test_demo_needs_no_marker_registration_or_bridge(self):
         self.put(q.VIEWS, 'PHET_SIMS = []\n')

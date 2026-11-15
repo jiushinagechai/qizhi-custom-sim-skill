@@ -22,4 +22,9 @@ Explain what the student may and may not infer from the model.
 ## Implementation choice
 
 State rendering approach and layout, with the reason each serves the investigation.
-Link the acceptance list. Update this document when the approved scope changes.
+Link the development specification and acceptance list. Present all three before implementation; update them together when approved behavior changes.
+
+## Proposal revisions
+
+| Revision | User feedback | Correction / rationale | Decision evidence |
+| --- | --- | --- | --- |

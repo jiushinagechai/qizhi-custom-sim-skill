@@ -7,7 +7,7 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parent
-VERSION = '1.0.0'
+VERSION = '1.1.0'
 
 
 def build_at(target):

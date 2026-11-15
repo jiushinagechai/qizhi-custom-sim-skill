@@ -4,6 +4,8 @@ import argparse
 import ast
 import datetime as dt
 import hashlib
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -12,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from urllib.parse import quote
 
 SKILL = Path(__file__).resolve().parents[1]
 VIEWS = 'django_site/phet/views.py'
@@ -21,6 +24,7 @@ TEMPLATE = 'django_site/templates/phet/phet_sim.html'
 AUDIT = 'phet-audit/audit.js'
 SIM_DIR = 'django_site/static/phet-sims'
 SLUG = re.compile(r'^[a-z][a-z0-9_-]*$')
+TEXTBOOK_CONFIG = '.qizhi-sim.local.json'
 
 
 def now():
@@ -85,7 +89,149 @@ def load_manifest(root, slug):
         if not isinstance(m.get(key), str) or not m[key]:
             raise ValueError('Missing manifest path: ' + key)
         inside(root, m[key])
+    if 'development' in m:
+        if not isinstance(m['development'], str) or not m['development']:
+            raise ValueError('Invalid development document path')
+        inside(root, m['development'])
     return path, m
+
+
+def textbook_config(root):
+    path = root / TEXTBOOK_CONFIG
+    if not path.exists():
+        return {'schema': 1, 'directory': '', 'curriculum': '', 'books': []}
+    data = json.loads(read(path))
+    if (not isinstance(data, dict) or data.get('schema') != 1
+            or not isinstance(data.get('directory'), str) or not isinstance(data.get('curriculum'), str)
+            or not isinstance(data.get('books'), list)):
+        raise ValueError('Invalid local textbook configuration: ' + str(path))
+    ids = set()
+    for book in data['books']:
+        if (not isinstance(book, dict) or any(not isinstance(book.get(k), str) or not book[k]
+                for k in ('id', 'publisher', 'edition', 'file'))
+                or book.get('grade') not in range(1, 7) or book.get('semester') not in ('上', '下')
+                or book['id'] in ids):
+            raise ValueError('Invalid or duplicate textbook entry in ' + str(path))
+        ids.add(book['id'])
+    return data
+
+
+def save_textbooks(root, data):
+    # Machine-specific paths belong only in this checkout, never in its tracked docs.
+    if git(root, 'ls-files', '--', TEXTBOOK_CONFIG):
+        raise ValueError('Local textbook config is tracked by Git; untrack it before storing personal paths.')
+    if (root / TEXTBOOK_CONFIG).is_symlink():
+        raise ValueError('Local textbook config must not be a symlink')
+    exclude = Path(git(root, 'rev-parse', '--git-path', 'info/exclude'))
+    if not exclude.is_absolute():
+        exclude = root / exclude
+    content = read(exclude) if exclude.exists() else ''
+    rule = '/' + TEXTBOOK_CONFIG
+    if rule not in content.splitlines():
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open('a', encoding='utf-8') as f:
+            f.write(('\n' if content and not content.endswith('\n') else '') + rule + '\n')
+    save(root / TEXTBOOK_CONFIG, data)
+
+
+def source_path(value, directory):
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        if not directory:
+            raise ValueError('Set a textbook directory first or supply an absolute PDF path.')
+        path = Path(directory) / path
+    path = path.resolve()
+    if not path.is_file() or path.suffix.lower() != '.pdf':
+        raise ValueError('PDF does not exist: ' + str(path))
+    return str(path)
+
+
+def textbooks(args, root):
+    data = textbook_config(root)
+    if args.book_action == 'configure':
+        if not args.directory and not args.curriculum:
+            raise ValueError('Supply --directory and/or --curriculum.')
+        if args.directory:
+            directory = Path(args.directory).expanduser().resolve()
+            if not directory.is_dir():
+                raise ValueError('Textbook directory does not exist: ' + str(directory))
+            data['directory'] = str(directory)
+        if args.curriculum:
+            data['curriculum'] = source_path(args.curriculum, data['directory'])
+        save_textbooks(root, data)
+        print('Saved local textbook configuration: ' + str(root / TEXTBOOK_CONFIG))
+        print('Existing book mappings are preserved; re-register a moved PDF with add --replace.')
+        return 0
+    if args.book_action == 'add':
+        if not SLUG.fullmatch(args.id):
+            raise ValueError('Book ID must use lowercase letters, digits, hyphens or underscores.')
+        existing = next((b for b in data['books'] if b['id'] == args.id), None)
+        if existing and not args.replace:
+            raise ValueError('Book ID exists; use --replace to deliberately update this mapping.')
+        book = dict(id=args.id, grade=args.grade, semester=args.semester, publisher=args.publisher,
+                    edition=args.edition, file=source_path(args.file, data['directory']))
+        data['books'] = [b for b in data['books'] if b['id'] != args.id] + [book]
+        save_textbooks(root, data)
+        print('Registered ' + args.id + ': ' + book['file'])
+        return 0
+    books = data['books']
+    if args.book_action == 'find':
+        books = [b for b in books if b['grade'] == args.grade
+                 and (not args.semester or b['semester'] == args.semester)
+                 and (not args.publisher or b['publisher'] == args.publisher)
+                 and (not args.edition or b['edition'] == args.edition)]
+    matches = [dict(b, available=Path(b['file']).is_file()) for b in books]
+    result = dict(directory=data['directory'], curriculum=data['curriculum'],
+                  curriculum_available=bool(data['curriculum'] and Path(data['curriculum']).is_file()),
+                  matches=matches, selection_required=len(matches) > 1)
+    if args.book_action == 'list':
+        folder = Path(data['directory']) if data['directory'] else None
+        result['pdf_candidates'] = sorted(str(p.relative_to(folder)) for p in folder.rglob('*')
+                                          if p.is_file() and p.suffix.lower() == '.pdf') if folder and folder.is_dir() else []
+    result['next_step'] = ('Read the selected PDF cover/contents and locate unit/lesson pages; metadata is not proof of lesson scope.'
+                           if matches else 'No registered match. List PDF candidates, inspect cover/contents, then register the correct book.')
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return int(args.book_action == 'find' and (not matches or not any(b['available'] for b in matches)))
+
+
+def preview(args, root):
+    _, m = load_manifest(root, args.slug)
+    sim = inside(root, m['file'])
+    if sim.parent != root / SIM_DIR or sim.suffix.lower() != '.html' or not sim.is_file():
+        raise ValueError('Preview requires an existing flat HTML file in ' + SIM_DIR)
+    digest = hashlib.sha256(sim.read_bytes()).hexdigest()
+    if not args.serve:
+        print(json.dumps(dict(file=str(sim), url=sim.as_uri(), sha256=digest,
+                              note='Open in a browser, or use preview --serve for HTTP. This does not record acceptance.'),
+                         ensure_ascii=False, indent=2))
+        return 0
+
+    class Handler(SimpleHTTPRequestHandler):
+        def send_head(self):
+            requested = Path(self.translate_path(self.path)).resolve()
+            if not requested.is_relative_to(sim.parent.resolve()):
+                self.send_error(403, 'Path outside simulation directory')
+                return None
+            return super().send_head()
+
+        def end_headers(self):
+            self.send_header('Cache-Control', 'no-store')
+            super().end_headers()
+
+        def list_directory(self, path):
+            self.send_error(403, 'Directory listing disabled')
+            return None
+
+    # Serve only the static simulation folder, never the project or textbook root.
+    with ThreadingHTTPServer(('127.0.0.1', args.port), partial(Handler, directory=str(sim.parent))) as server:
+        url = 'http://127.0.0.1:' + str(server.server_port) + '/' + quote(sim.name) + '?preview=' + digest[:12]
+        print(json.dumps(dict(url=url, sha256=digest, note='Local preview; keep this process running. Ctrl+C stops it.'),
+                         ensure_ascii=False), flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+    return 0
 
 
 def literal_assignment(source, name):
@@ -174,6 +320,7 @@ def script_version(source):
 
 def tracked_paths(m):
     return sorted(set([m[k] for k in ('file', 'probe', 'bridge', 'acceptance', 'design', 'lesson')]
+                      + ([m['development']] if m.get('development') else [])
                       + [VIEWS, PROMPTS, ELEMENTS, TEMPLATE, AUDIT, 'phet-audit/browser.js',
                          'phet-audit/package.json', 'phet-audit/package-lock.json',
                          'django_site/static/js/qizhi-phet-bridge.js',
@@ -208,9 +355,10 @@ def init(args, root):
              file=sim.relative_to(root).as_posix(), probe='phet-audit/probe-' + args.slug + '.cjs',
              bridge='phet-audit/verify-bridge-' + args.slug + '.js',
              lesson=folder + '/01-lesson-research.md', design=folder + '/02-design.md',
-             acceptance=folder + '/03-acceptance.md', checks={}, human={})
+             acceptance=folder + '/03-acceptance.md', development=folder + '/04-development.md', checks={}, human={})
     path.parent.mkdir(parents=True, exist_ok=True)
-    for key, template in [('lesson', 'lesson-research.md'), ('design', 'design.md'), ('acceptance', 'acceptance.md')]:
+    for key, template in [('lesson', 'lesson-research.md'), ('design', 'design.md'),
+                          ('acceptance', 'acceptance.md'), ('development', 'development.md')]:
         target = inside(root, m[key])
         if not target.exists():
             target.write_text(read(SKILL / 'assets' / template).replace('{{slug}}', args.slug), encoding='utf-8')
@@ -238,6 +386,8 @@ def doctor(args, root):
             failures.append('browser')
             print('Run npm ci in phet-audit (npm install if no lockfile); install Chrome/Edge or set QIZHI_BROWSER.')
     print('INFO textbook extraction: ' + ('pdftotext available' if shutil.which('pdftotext') else 'install Poppler or use your PDF-reading tool'))
+    data = textbook_config(root)
+    print('INFO textbooks: ' + str(len(data['books'])) + ' mapped; use textbooks list/find before lesson research.')
     print('INFO local sim checks need no Django server or AI API key. Platform/student checks do.')
     return int(bool(failures))
 
@@ -295,7 +445,10 @@ def gate(args, root):
         return 'exit=0; ' + str(run_dir / (name + '.log'))
 
     def files():
-        missing = [x for x in [m['file'], m['probe'], m['acceptance'], m['design'], m['lesson']]
+        required = [m['file'], m['probe'], m['acceptance'], m['design'], m['lesson']]
+        if m.get('development'):
+            required.append(m['development'])
+        missing = [x for x in required
                    if not inside(root, x).is_file()]
         if missing:
             raise ValueError('Missing: ' + ', '.join(missing))
@@ -372,7 +525,15 @@ def status(args, root):
             state = 'NOT RUN' if not checks else ('STALE' if checks.get('fingerprint') != current else 'PASS' if checks.get('passed') else 'FAIL')
             print(m['slug'] + ' | phase=' + m['phase'] + ' | gate=' + state + ' (' + checks.get('phase', '-') + ')')
             for key, result in m.get('human', {}).items():
-                state = 'STALE' if result.get('fingerprint') != current else result['status']
+                changed = result.get('fingerprint') != current
+                if key in ('design', 'demo') and result.get('artifacts'):
+                    changed = any(not inside(root, name).is_file()
+                                  or hashlib.sha256(inside(root, name).read_bytes()).hexdigest() != digest
+                                  for name, digest in result['artifacts'].items())
+                if key in ('design', 'demo', 'integration', 'commit'):
+                    state = result['status'] + (' (historical decision; content changed, reassess only the affected scope)' if changed else '')
+                else:
+                    state = 'STALE' if changed else result['status']
                 print('  ' + key + ': ' + state + '; ' + result.get('evidence', ''))
         except Exception as e:
             print('FAIL ' + str(path) + ': ' + str(e))
@@ -383,8 +544,15 @@ def status(args, root):
 
 def mark(args, root):
     path, m = load_manifest(root, args.slug)
-    m.setdefault('human', {})[args.item] = dict(status=args.result, at=now(), by=args.by,
-                                             evidence=args.evidence, fingerprint=fingerprint(root, m))
+    entry = dict(status=args.result, at=now(), by=args.by, evidence=args.evidence, fingerprint=fingerprint(root, m))
+    if args.item in ('demo', 'design'):
+        keys = ('file',) if args.item == 'demo' else ('design', 'acceptance', 'development')
+        entry['artifacts'] = {m[k]: hashlib.sha256(inside(root, m[k]).read_bytes()).hexdigest()
+                              for k in keys if k in m and inside(root, m[k]).is_file()}
+        if args.result == 'pass' and (not entry['artifacts'] or any(
+                not inside(root, m[k]).is_file() for k in keys if k in m)):
+            raise ValueError('Cannot approve missing review artifacts')
+    m.setdefault('human', {})[args.item] = entry
     save(path, m)
     print('Recorded actual human decision: ' + args.item + '=' + args.result)
     return 0
@@ -395,6 +563,22 @@ def main():
     parser.add_argument('--repo', required=True, help='Explicit path to a qizhi Git checkout')
     sub = parser.add_subparsers(dest='action', required=True)
     sub.add_parser('doctor')
+    p = sub.add_parser('textbooks', help='Local textbook directory and explicit grade/semester mappings')
+    books = p.add_subparsers(dest='book_action', required=True)
+    b = books.add_parser('configure')
+    b.add_argument('--directory'); b.add_argument('--curriculum')
+    b = books.add_parser('add')
+    b.add_argument('--id', required=True); b.add_argument('--grade', type=int, choices=range(1, 7), required=True)
+    b.add_argument('--semester', choices=['上', '下'], required=True)
+    b.add_argument('--publisher', required=True); b.add_argument('--edition', required=True)
+    b.add_argument('--file', required=True); b.add_argument('--replace', action='store_true')
+    b = books.add_parser('find')
+    b.add_argument('--grade', type=int, choices=range(1, 7), required=True)
+    b.add_argument('--semester', choices=['上', '下']); b.add_argument('--publisher'); b.add_argument('--edition')
+    books.add_parser('list')
+    p = sub.add_parser('preview', help='Print an openable HTML path or serve a local no-cache preview')
+    p.add_argument('slug'); p.add_argument('--serve', action='store_true')
+    p.add_argument('--port', type=int, default=0, help='Local HTTP port; 0 chooses a free port')
     p = sub.add_parser('init')
     p.add_argument('slug'); p.add_argument('--file', required=True); p.add_argument('--owner', required=True)
     p.add_argument('--base', default='HEAD', help='Commit/ref before this change; stored as an immutable SHA')
@@ -403,13 +587,15 @@ def main():
     p.add_argument('--timeout', type=int, default=420, help='Seconds per child command')
     p = sub.add_parser('status'); p.add_argument('slug', nargs='?')
     p = sub.add_parser('mark')
-    p.add_argument('slug'); p.add_argument('item', choices=['design', 'review', 'tablet', 'taskcard', 'csv', 'playtest', 'commit'])
+    p.add_argument('slug'); p.add_argument('item', choices=['design', 'demo', 'integration', 'platform', 'review', 'tablet', 'taskcard', 'csv', 'playtest', 'commit'])
     p.add_argument('--result', choices=['pass', 'fail', 'pending', 'not_applicable'], required=True)
     p.add_argument('--by', required=True); p.add_argument('--evidence', required=True)
     args = parser.parse_args()
     try:
         if getattr(args, 'timeout', 1) <= 0:
             raise ValueError('Timeout must be positive')
+        if not 0 <= getattr(args, 'port', 0) <= 65535:
+            raise ValueError('Port must be between 0 and 65535')
         root = repo_path(args.repo)
         return globals()[args.action](args, root)
     except (ValueError, OSError, SyntaxError, KeyError, TypeError) as e:

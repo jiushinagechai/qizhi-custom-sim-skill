@@ -8,6 +8,8 @@ Record edition, book, lesson, printed page, and PDF physical page separately. Lo
 
 Research comparable interactions using available search/browser tools. Each useful conclusion includes its URL/source, what was observed, and why to adopt/reject it. A compact summary is enough; retain citations rather than dumping raw results. Finding no suitable precedent is a valid result. Compare an existing PhET experiment against the actual approved goal; do not replace a request for a custom sim solely because an embed exists. Reuse interaction ideas; include external art/code only with a verified applicable license and attribution.
 
+For new experiments, research follows actual textbook reading and precedes final design. Open relevant sources and distinguish direct interaction observations from descriptions. If browsing is blocked, mark research pending and ask for an explicit exception before skipping it. Use `textbooks find/list` as described in [textbooks-and-preview.md](textbooks-and-preview.md); registered metadata alone is not evidence of reading the unit.
+
 ## Design approval
 
 The first section states: lesson and pages; scope; student-controlled variables; fixed variables; observables; explicitly excluded features; chosen interaction. Then specify:
@@ -21,6 +23,8 @@ The first section states: lesson and pages; scope; student-controlled variables;
 Use `[probe:A1]` for automated assertions and `[visual:V1]` for screenshot/browser review. Numerical thresholds must come from a source, calculation, or explicitly justified modeling choice; never derive the expected answer only from the implementation being tested. Visual review can cover labels, diagrams, timing, and legibility; hit testing, overflow, and target sizes can also be automated.
 
 Present the proposed design and unresolved consequential choices together. Ordinary implementation decisions do not need repeated approval. When a requirement changes, update the design and acceptance list before claiming the implementation meets it.
+
+Before approval, complete `04-development.md` alongside the design: feature IDs; apparatus and controls; initial layout and supported viewports; action → state → visible response; model inputs/rules/units/sources; parameter boundaries; pause/reset/recovery; implementation steps/ownership; feature-to-acceptance mapping. The design explains teaching choices; the development specification makes them implementable. Separate future platform adaptation from Demo work. Present the documents together, revise until approved, and hand their exact agreed revision to the developer.
 
 ## Implementation
 
@@ -40,4 +44,6 @@ Run real clicks, drags, slider changes, pause/resume, reset, and repeated runs a
 
 ## Evidence size
 
-Keep the three concise lesson/design/acceptance documents in the experiment's docs folder. Small repairs update existing documents instead of creating another set. Store generated logs/screenshots under `phet-audit/out/skill/<slug>/`; summarize key measurements in the acceptance document. Do not commit copyrighted textbooks, student exports, device profiles, or personal absolute paths.
+After each checked Demo iteration, provide the openable preview and address feedback using [textbooks-and-preview.md](textbooks-and-preview.md). Continue the same page until the user accepts it; tests alone do not advance to integration.
+
+Keep the four concise lesson/design/acceptance/development documents in the experiment's docs folder. Small repairs update existing documents instead of creating another set. Store generated logs/screenshots under `phet-audit/out/skill/<slug>/`; summarize key measurements in the acceptance document. Do not commit copyrighted textbooks, student exports, device profiles, or personal absolute paths.
