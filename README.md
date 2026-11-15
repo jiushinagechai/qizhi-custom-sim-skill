@@ -1,5 +1,7 @@
 # 启智自制仿真实验 Skill
 
+[![跨平台检查](https://github.com/jiushinagechai/qizhi-custom-sim-skill/actions/workflows/check.yml/badge.svg)](https://github.com/jiushinagechai/qizhi-custom-sim-skill/actions/workflows/check.yml)
+
 面向 qizhi 平台开发者的教材驱动仿真开发技能包，提供 **Codex** 和 **Claude Code** 两个可独立安装的版本。适用于新建实验、修改已有实验、接入已有 HTML，以及验收和审查。
 
 两个版本由 `common/custom-sim/` 生成，共用流程、模板和检查逻辑，只在工具入口与代理配置上不同。无需作者的个人目录、账号、教材存放位置或历史台账。工作流脚本仅使用 Python 标准库，支持 Windows、macOS、Linux；不要求 Bash。

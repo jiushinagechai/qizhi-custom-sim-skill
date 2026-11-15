@@ -269,8 +269,8 @@ class PackagingTests(unittest.TestCase):
             for path in (PACKAGE / folder).rglob('*'):
                 if path.is_file() and '__pycache__' not in path.parts:
                     content = path.read_text(encoding='utf-8')
-                    self.assertNotIn('/Users/ouyangle', content, str(path))
-                    self.assertNotIn('Desktop/启智项目', content, str(path))
+                    self.assertNotRegex(content, r'/(?:Users|home)/[^/\s]+/', str(path))
+                    self.assertNotRegex(content, r'[A-Z]:\\Users\\[^\\]+\\', str(path))
         self.assertFalse(list((PACKAGE / 'editions').rglob('manifest.json')))
 
 
